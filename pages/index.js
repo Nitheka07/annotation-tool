@@ -37,6 +37,12 @@ export default function Home() {
   const [activeClassKey, setActiveClassKey] = useState('1');
   const [statusMessage, setStatusMessage] = useState('Ready. Select a project folder containing drawings to begin.');
   const [statusColor, setStatusColor] = useState('var(--txt-muted)');
+  const [hasYoloStructure, setHasYoloStructure] = useState(false);
+  const hasYoloStructureRef = useRef(false);
+
+  useEffect(() => {
+    hasYoloStructureRef.current = hasYoloStructure;
+  }, [hasYoloStructure]);
   
   // Tool navigation: Draw Mode vs Pan Mode
   const [activeTool, setActiveTool] = useState('draw'); // 'draw' or 'pan'
@@ -234,12 +240,87 @@ export default function Home() {
     }
   };
 
+  const initializeYoloStructure = async () => {
+    if (!directoryHandle) return;
+    try {
+      setStatus('Converting directory to YOLO format...', 'var(--accent-amber)');
+      
+      // Request write permission
+      const hasPermission = await verifyPermission(directoryHandle, true);
+      if (!hasPermission) {
+        setStatus('❌ Permission denied to convert folder.', 'var(--accent-red)');
+        alert('Write permission is required to restructure the directory.');
+        return;
+      }
+
+      const imagesDir = await directoryHandle.getDirectoryHandle('images', { create: true });
+      const labelsDir = await directoryHandle.getDirectoryHandle('labels', { create: true });
+
+      const validExts = ['.jpg', '.jpeg', '.png'];
+
+      for await (const entry of directoryHandle.values()) {
+        if (entry.kind === 'file') {
+          const ext = entry.name.slice(entry.name.lastIndexOf('.')).toLowerCase();
+          
+          if (validExts.includes(ext) && !entry.name.startsWith('.')) {
+            // Move image
+            const file = await entry.getFile();
+            const newFileHandle = await imagesDir.getFileHandle(entry.name, { create: true });
+            const writable = await newFileHandle.createWritable();
+            await writable.write(file);
+            await writable.close();
+            
+            // Remove original
+            await directoryHandle.removeEntry(entry.name);
+          } else if (ext === '.txt' && entry.name !== 'classes.txt') {
+            // Move annotation
+            const file = await entry.getFile();
+            const newFileHandle = await labelsDir.getFileHandle(entry.name, { create: true });
+            const writable = await newFileHandle.createWritable();
+            await writable.write(file);
+            await writable.close();
+            
+            // Remove original
+            await directoryHandle.removeEntry(entry.name);
+          }
+        }
+      }
+
+      setStatus('🎉 Directory successfully converted to proper YOLO dataset structure!', 'var(--accent-green)');
+      alert('YOLO Structure Created!\n\nSuccessfully created /images and /labels subdirectories, migrated all existing drawings and annotation files, and hot-reloaded the workspace.');
+      
+      // Rescan directory
+      await scanDirectory(directoryHandle);
+    } catch (err) {
+      console.error('Conversion failed:', err);
+      setStatus(`❌ Conversion failed: ${err.message}`, 'var(--accent-red)');
+      alert(`Directory Conversion Failed:\n${err.message}`);
+    }
+  };
+
   const scanDirectory = async (dirHandle, silent = false) => {
     const validExts = ['.jpg', '.jpeg', '.png'];
     const foundImages = [];
 
     try {
-      for await (const entry of dirHandle.values()) {
+      // Check if images and labels subdirectories exist
+      let imagesDirHandle = null;
+      let labelsDirHandle = null;
+      let isYoloFormat = false;
+
+      try {
+        imagesDirHandle = await dirHandle.getDirectoryHandle('images');
+        labelsDirHandle = await dirHandle.getDirectoryHandle('labels');
+        isYoloFormat = true;
+      } catch (e) {
+        // One or both do not exist - flat directory layout
+      }
+
+      setHasYoloStructure(isYoloFormat);
+
+      const targetDirHandle = isYoloFormat ? imagesDirHandle : dirHandle;
+
+      for await (const entry of targetDirHandle.values()) {
         if (entry.kind === 'file') {
           const ext = entry.name.slice(entry.name.lastIndexOf('.')).toLowerCase();
           if (validExts.includes(ext) && !entry.name.startsWith('.')) {
@@ -247,7 +328,9 @@ export default function Home() {
             const txtName = entry.name.substring(0, entry.name.lastIndexOf('.')) + '.txt';
             let annotationCount = 0;
             try {
-              const txtHandle = await dirHandle.getFileHandle(txtName);
+              const txtHandle = isYoloFormat
+                ? await labelsDirHandle.getFileHandle(txtName)
+                : await dirHandle.getFileHandle(txtName);
               const file = await txtHandle.getFile();
               const text = await file.text();
               annotationCount = text.split('\n').filter(l => l.trim()).length;
@@ -264,9 +347,13 @@ export default function Home() {
       // Update status outside of state setter to prevent stale status messages and pure-function side effects
       if (!silent) {
         if (foundImages.length === 0) {
-          setStatus('📂 Selected folder is empty. Place drawing images (.jpg, .jpeg, .png) inside it to begin.', 'var(--accent-amber)');
+          if (isYoloFormat) {
+            setStatus('📂 Selected /images folder is empty. Place drawings inside to begin.', 'var(--accent-amber)');
+          } else {
+            setStatus('📂 Selected folder is empty. Place drawing images (.jpg, .jpeg, .png) inside it to begin.', 'var(--accent-amber)');
+          }
         } else {
-          setStatus(`📂 Loaded folder. Found ${foundImages.length} drawings.`, 'var(--accent-green)');
+          setStatus(`📂 Loaded folder in ${isYoloFormat ? 'proper YOLO' : 'flat'} layout. Found ${foundImages.length} drawings.`, 'var(--accent-green)');
         }
       }
 
@@ -314,7 +401,14 @@ export default function Home() {
     const txtName = imgName.substring(0, imgName.lastIndexOf('.')) + '.txt';
 
     try {
-      const txtHandle = await directoryHandle.getFileHandle(txtName);
+      let txtHandle;
+      if (hasYoloStructureRef.current) {
+        const labelsDirHandle = await directoryHandle.getDirectoryHandle('labels');
+        txtHandle = await labelsDirHandle.getFileHandle(txtName);
+      } else {
+        txtHandle = await directoryHandle.getFileHandle(txtName);
+      }
+      
       const file = await txtHandle.getFile();
       const mtime = file.lastModified;
 
@@ -346,7 +440,14 @@ export default function Home() {
 
     const txtName = imgName.substring(0, imgName.lastIndexOf('.')) + '.txt';
     try {
-      const txtHandle = await directoryHandle.getFileHandle(txtName);
+      let txtHandle;
+      if (hasYoloStructureRef.current) {
+        const labelsDirHandle = await directoryHandle.getDirectoryHandle('labels');
+        txtHandle = await labelsDirHandle.getFileHandle(txtName);
+      } else {
+        txtHandle = await directoryHandle.getFileHandle(txtName);
+      }
+      
       const file = await txtHandle.getFile();
       lastTxtMtime.current = file.lastModified;
       const text = await file.text();
@@ -409,7 +510,14 @@ export default function Home() {
     const txtName = imgName.substring(0, imgName.lastIndexOf('.')) + '.txt';
 
     try {
-      const txtHandle = await directoryHandle.getFileHandle(txtName, { create: true });
+      let txtHandle;
+      if (hasYoloStructureRef.current) {
+        const labelsDirHandle = await directoryHandle.getDirectoryHandle('labels', { create: true });
+        txtHandle = await labelsDirHandle.getFileHandle(txtName, { create: true });
+      } else {
+        txtHandle = await directoryHandle.getFileHandle(txtName, { create: true });
+      }
+
       const writable = await txtHandle.createWritable();
       await writable.write(content);
       await writable.close();
@@ -500,7 +608,13 @@ export default function Home() {
           const txtName = payload.imageName.substring(0, payload.imageName.lastIndexOf('.')) + '.txt';
           let text = '';
           try {
-            const txtHandle = await directoryHandle.getFileHandle(txtName);
+            let txtHandle;
+            if (hasYoloStructureRef.current) {
+              const labelsDirHandle = await directoryHandle.getDirectoryHandle('labels');
+              txtHandle = await labelsDirHandle.getFileHandle(txtName);
+            } else {
+              txtHandle = await directoryHandle.getFileHandle(txtName);
+            }
             const file = await txtHandle.getFile();
             text = await file.text();
           } catch (e) {
@@ -514,7 +628,13 @@ export default function Home() {
         } else if (payload.type === 'SAVE_ANNOTATIONS') {
           const txtName = payload.imageName.substring(0, payload.imageName.lastIndexOf('.')) + '.txt';
           try {
-            const txtHandle = await directoryHandle.getFileHandle(txtName, { create: true });
+            let txtHandle;
+            if (hasYoloStructureRef.current) {
+              const labelsDirHandle = await directoryHandle.getDirectoryHandle('labels', { create: true });
+              txtHandle = await labelsDirHandle.getFileHandle(txtName, { create: true });
+            } else {
+              txtHandle = await directoryHandle.getFileHandle(txtName, { create: true });
+            }
             const writable = await txtHandle.createWritable();
             await writable.write(payload.text);
             await writable.close();
@@ -1173,7 +1293,13 @@ export default function Home() {
               const pageNumStr = i.toString().padStart(3, '0');
               const outImgName = `${pdfBaseName}_page_${pageNumStr}.jpg`;
               
-              const pageHandle = await directoryHandle.getFileHandle(outImgName, { create: true });
+              let pageHandle;
+              if (hasYoloStructureRef.current) {
+                const imagesDirHandle = await directoryHandle.getDirectoryHandle('images');
+                pageHandle = await imagesDirHandle.getFileHandle(outImgName, { create: true });
+              } else {
+                pageHandle = await directoryHandle.getFileHandle(outImgName, { create: true });
+              }
               const writable = await pageHandle.createWritable();
               await writable.write(jpegBlob);
               await writable.close();
@@ -1438,6 +1564,48 @@ export default function Home() {
           <button className="btn-secondary" onClick={copyInviteLink} style={{ marginBottom: '8px', border: '1px dashed var(--accent-blue)', color: 'var(--accent-blue-hover)' }}>
             👥 Copy Teammate Invite Link
           </button>
+
+          {directoryHandle && p2pRole !== 'guest' && !hasYoloStructure && (
+            <div style={{
+              margin: '0 0 12px 0',
+              padding: '12px',
+              borderRadius: '6px',
+              background: 'rgba(255, 145, 0, 0.1)',
+              border: '1px solid rgba(255, 145, 0, 0.3)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px'
+            }}>
+              <div style={{ fontSize: '11px', color: 'var(--accent-amber)', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                ⚠️ Flat Folder Detected
+              </div>
+              <p style={{ fontSize: '11px', color: 'var(--txt-muted)', margin: 0, lineHeight: '1.4' }}>
+                For a proper YOLO dataset format, store drawings in <code style={{color: '#fff', background: 'rgba(0,0,0,0.2)', padding: '1px 3px', borderRadius: '3px'}}>/images</code> and annotations in <code style={{color: '#fff', background: 'rgba(0,0,0,0.2)', padding: '1px 3px', borderRadius: '3px'}}>/labels</code>.
+              </p>
+              <button 
+                onClick={initializeYoloStructure}
+                style={{
+                  background: 'var(--accent-amber)',
+                  color: '#000000',
+                  border: 'none',
+                  borderRadius: '4px',
+                  padding: '6px 10px',
+                  fontSize: '11px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '4px',
+                  transition: 'background-color 0.2s'
+                }}
+                onMouseOver={(e) => e.target.style.backgroundColor = '#FFB300'}
+                onMouseOut={(e) => e.target.style.backgroundColor = 'var(--accent-amber)'}
+              >
+                ⚡ Convert to YOLO Format
+              </button>
+            </div>
+          )}
           
           <div className="action-grid-2x2">
             {p2pRole !== 'guest' && (
