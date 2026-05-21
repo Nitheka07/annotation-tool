@@ -52,6 +52,23 @@ export default function Home() {
     scrollModeRef.current = scrollMode;
   }, [scrollMode]);
 
+  // Peer-to-Peer WebRTC Direct Sync states
+  const [p2pActive, setP2pActive] = useState(false);
+  const [p2pRoomId, setP2pRoomId] = useState('');
+  const [p2pRole, setP2pRole] = useState(''); // 'host' or 'guest'
+  const [p2pStatus, setP2pStatus] = useState('');
+  const [connectedPeersCount, setConnectedPeersCount] = useState(0);
+
+  const peerRef = useRef(null);
+  const connectionsRef = useRef([]); // WebRTC active connection channels
+  const p2pRoleRef = useRef('');
+  const p2pActiveRef = useRef(false);
+
+  useEffect(() => {
+    p2pRoleRef.current = p2pRole;
+    p2pActiveRef.current = p2pActive;
+  }, [p2pRole, p2pActive]);
+
   const updateCursor = (panningOverride = null) => {
     const panning = panningOverride !== null ? panningOverride : viewState.current.isPanning;
     if (spacePressed.current || activeToolRef.current === 'pan') {
@@ -68,6 +85,7 @@ export default function Home() {
   // Onboarding & collaboration states
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [invitedProjectName, setInvitedProjectName] = useState('');
+  const [invitedP2pRoomId, setInvitedP2pRoomId] = useState('');
 
   // --- YOLO label file parser helper ---
   const parseYoloData = (text, imgWidth, imgHeight) => {
@@ -138,25 +156,55 @@ export default function Home() {
         document.head.appendChild(script);
       }
 
+      // Load PeerJS Script tag dynamically for WebRTC P2P direct syncing
+      if (!window.Peer) {
+        const peerScript = document.createElement('script');
+        peerScript.src = 'https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js';
+        document.head.appendChild(peerScript);
+      }
+
       // Check for invite query params
       const params = new URLSearchParams(window.location.search);
       if (params.get('invite') === 'true') {
         const proj = params.get('project') || 'Drawing Project';
         setInvitedProjectName(proj);
+        const p2pParam = params.get('p2p') === 'true';
+        const roomParam = params.get('room') || '';
+        if (p2pParam && roomParam) {
+          setInvitedP2pRoomId(roomParam);
+        }
         setShowOnboarding(true);
       }
     }
   }, []);
 
+  // Isolated useEffect to clean up P2P connections on unmount
+  useEffect(() => {
+    return () => {
+      connectionsRef.current.forEach(conn => conn.close());
+      if (peerRef.current) {
+        peerRef.current.destroy();
+      }
+    };
+  }, []);
+
   // --- Invite Link Generator ---
   const copyInviteLink = () => {
-    const projName = directoryHandle ? directoryHandle.name : 'Drawing Project';
-    const inviteUrl = `${window.location.origin}${window.location.pathname}?invite=true&project=${encodeURIComponent(projName)}`;
+    const projName = directoryHandle ? directoryHandle.name : (invitedProjectName || 'Drawing Project');
+    let inviteUrl = `${window.location.origin}${window.location.pathname}?invite=true&project=${encodeURIComponent(projName)}`;
     
+    if (p2pActive) {
+      inviteUrl += `&p2p=true&room=${p2pRoomId}`;
+    }
+
     if (navigator.clipboard) {
       navigator.clipboard.writeText(inviteUrl).then(() => {
         setStatus('🔗 Invite link successfully copied to clipboard!', 'var(--accent-green)');
-        alert(`Collaboration Invite Copied!\n\nShare this link with your teammates:\n${inviteUrl}\n\nWhen they click it, they will be guided to select their synced local folder copy and can immediately begin working simultaneously on different images.`);
+        if (p2pActive) {
+          alert(`🌐 WebRTC Peer-to-Peer Invite Link Copied!\n\nShare this direct connection link with your teammates:\n${inviteUrl}\n\nWhen they accept, they will connect directly browser-to-browser to your active session. They will be able to view all your drawings and annotate them in real-time, and all their changes will save directly onto your local disk folder!`);
+        } else {
+          alert(`Collaboration Invite Copied!\n\nShare this link with your teammates:\n${inviteUrl}\n\nWhen they click it, they will be guided to select their synced local folder copy and can immediately begin working simultaneously on different images.`);
+        }
       }).catch(err => {
         console.error('Failed to copy text: ', err);
         alert(`Could not copy automatically. Here is the link to share:\n\n${inviteUrl}`);
@@ -213,13 +261,19 @@ export default function Home() {
 
       foundImages.sort((a, b) => a.name.localeCompare(b.name));
       
+      // Update status outside of state setter to prevent stale status messages and pure-function side effects
+      if (!silent) {
+        if (foundImages.length === 0) {
+          setStatus('📂 Selected folder is empty. Place drawing images (.jpg, .jpeg, .png) inside it to begin.', 'var(--accent-amber)');
+        } else {
+          setStatus(`📂 Loaded folder. Found ${foundImages.length} drawings.`, 'var(--accent-green)');
+        }
+      }
+
       // Smart sidebar comparison to avoid component flicker
       setImages(prev => {
         const hasChanged = JSON.stringify(prev) !== JSON.stringify(foundImages);
         if (hasChanged) {
-          if (!silent) {
-            setStatus(`📂 Loaded folder. Found ${foundImages.length} drawings.`, 'var(--accent-green)');
-          }
           return foundImages;
         }
         return prev;
@@ -277,6 +331,19 @@ export default function Home() {
 
   // --- Load Annotations (YOLO parser) ---
   const loadAnnotations = async (imgName, silent = false) => {
+    if (p2pRoleRef.current === 'guest') {
+      // --- P2P GUEST MODE: Request annotations from host browser ---
+      connectionsRef.current.forEach(conn => {
+        if (conn.open) {
+          conn.send({
+            type: 'REQUEST_ANNOTATIONS',
+            imageName: imgName
+          });
+        }
+      });
+      return;
+    }
+
     const txtName = imgName.substring(0, imgName.lastIndexOf('.')) + '.txt';
     try {
       const txtHandle = await directoryHandle.getFileHandle(txtName);
@@ -300,33 +367,50 @@ export default function Home() {
 
   // --- Save Annotations (YOLO writer) ---
   const saveAnnotations = async () => {
-    if (!directoryHandle || currentImageIndex === -1) return;
-
+    if (currentImageIndex === -1) return;
     const imgName = images[currentImageIndex].name;
+    
+    // Generate YOLO text content
+    let content = '';
+    for (const ann of activeAnnotations.current) {
+      const classId = CLASSES_BY_NAME[ann.class].id;
+      const [x0, y0, x1, y1] = ann.box;
+
+      const w = x1 - x0;
+      const h = y1 - y0;
+      const xc = x0 + w / 2;
+      const yc = y0 + h / 2;
+
+      const nxc = xc / viewState.current.imgWidth;
+      const nyc = yc / viewState.current.imgHeight;
+      const nw = w / viewState.current.imgWidth;
+      const nh = h / viewState.current.imgHeight;
+
+      content += `${classId} ${nxc.toFixed(6)} ${nyc.toFixed(6)} ${nw.toFixed(6)} ${nh.toFixed(6)}\n`;
+    }
+
+    if (p2pRole === 'guest') {
+      // --- P2P GUEST MODE: Send changes directly to host over WebRTC ---
+      connectionsRef.current.forEach(conn => {
+        if (conn.open) {
+          conn.send({
+            type: 'SAVE_ANNOTATIONS',
+            imageName: imgName,
+            text: content
+          });
+        }
+      });
+      setStatus('⚡ Sent annotations to host browser for local disk saving.', 'var(--accent-blue)');
+      return;
+    }
+
+    // --- STANDARD / HOST MODE: Save directly to local filesystem ---
+    if (!directoryHandle) return;
     const txtName = imgName.substring(0, imgName.lastIndexOf('.')) + '.txt';
 
     try {
       const txtHandle = await directoryHandle.getFileHandle(txtName, { create: true });
       const writable = await txtHandle.createWritable();
-      
-      let content = '';
-      for (const ann of activeAnnotations.current) {
-        const classId = CLASSES_BY_NAME[ann.class].id;
-        const [x0, y0, x1, y1] = ann.box;
-
-        const w = x1 - x0;
-        const h = y1 - y0;
-        const xc = x0 + w / 2;
-        const yc = y0 + h / 2;
-
-        const nxc = xc / viewState.current.imgWidth;
-        const nyc = yc / viewState.current.imgHeight;
-        const nw = w / viewState.current.imgWidth;
-        const nh = h / viewState.current.imgHeight;
-
-        content += `${classId} ${nxc.toFixed(6)} ${nyc.toFixed(6)} ${nw.toFixed(6)} ${nh.toFixed(6)}\n`;
-      }
-
       await writable.write(content);
       await writable.close();
 
@@ -337,10 +421,234 @@ export default function Home() {
       // Update sidebar counts silently
       scanDirectory(directoryHandle, true);
       setStatus('💾 YOLO annotations saved successfully.', 'var(--accent-green)');
+
+      // Host: Broadcast updated annotations to all connected WebRTC guests
+      if (p2pRole === 'host') {
+        connectionsRef.current.forEach(conn => {
+          if (conn.open) {
+            conn.send({
+              type: 'SYNC_ANNOTATIONS',
+              imageName: imgName,
+              text: content
+            });
+          }
+        });
+      }
     } catch (err) {
       console.error(err);
       setStatus(`❌ Failed to save annotations: ${err.message}`, 'var(--accent-red)');
     }
+  };
+
+  // --- Peer-to-Peer WebRTC Direct Sync Functions ---
+  const startP2PHost = () => {
+    if (typeof window === 'undefined' || !window.Peer) {
+      alert('P2P library is still loading, please try again in a moment.');
+      return;
+    }
+    
+    // Auto-generate a room ID based on clean project name
+    const cleanProj = directoryHandle ? directoryHandle.name.replace(/[^a-zA-Z0-9]/g, '_') : 'project';
+    const randId = Math.random().toString(36).substring(2, 8);
+    const roomId = `${cleanProj}_${randId}`;
+    setP2pRoomId(roomId);
+
+    setStatus('🌐 Initializing PeerJS room as Host...', 'var(--accent-amber)');
+    setP2pRole('host');
+    setP2pActive(true);
+
+    const peer = new window.Peer(roomId);
+    peerRef.current = peer;
+
+    peer.on('open', (id) => {
+      setStatus(`🌐 Direct P2P Room Active: ${id}. Invite teammates!`, 'var(--accent-green)');
+    });
+
+    peer.on('connection', (conn) => {
+      connectionsRef.current = [...connectionsRef.current, conn];
+      setConnectedPeersCount(connectionsRef.current.filter(c => c.open).length);
+      setStatus('⚡ Teammate connected directly to your session!', 'var(--accent-green)');
+
+      conn.on('open', () => {
+        // Send current image list on connect
+        conn.send({
+          type: 'IMAGES_LIST',
+          images: images.map(img => ({ name: img.name, count: img.count }))
+        });
+      });
+
+      conn.on('data', async (payload) => {
+        if (payload.type === 'REQUEST_IMAGE') {
+          const imgObj = images.find(img => img.name === payload.imageName);
+          if (imgObj && imgObj.handle) {
+            try {
+              const file = await imgObj.handle.getFile();
+              const reader = new FileReader();
+              reader.onload = () => {
+                conn.send({
+                  type: 'IMAGE_RESPONSE',
+                  imageName: payload.imageName,
+                  base64: reader.result
+                });
+              };
+              reader.readAsDataURL(file);
+            } catch (err) {
+              console.error('P2P host getFile error:', err);
+            }
+          }
+        } else if (payload.type === 'REQUEST_ANNOTATIONS') {
+          const txtName = payload.imageName.substring(0, payload.imageName.lastIndexOf('.')) + '.txt';
+          let text = '';
+          try {
+            const txtHandle = await directoryHandle.getFileHandle(txtName);
+            const file = await txtHandle.getFile();
+            text = await file.text();
+          } catch (e) {
+            // txt doesn't exist
+          }
+          conn.send({
+            type: 'SYNC_ANNOTATIONS',
+            imageName: payload.imageName,
+            text: text
+          });
+        } else if (payload.type === 'SAVE_ANNOTATIONS') {
+          const txtName = payload.imageName.substring(0, payload.imageName.lastIndexOf('.')) + '.txt';
+          try {
+            const txtHandle = await directoryHandle.getFileHandle(txtName, { create: true });
+            const writable = await txtHandle.createWritable();
+            await writable.write(payload.text);
+            await writable.close();
+
+            // Refresh host sidebar annotation counts
+            scanDirectory(directoryHandle, true);
+
+            // Broadcast to other guests
+            connectionsRef.current.forEach(c => {
+              if (c !== conn && c.open) {
+                c.send({
+                  type: 'SYNC_ANNOTATIONS',
+                  imageName: payload.imageName,
+                  text: payload.text
+                });
+              }
+            });
+
+            // Hot-reload Host canvas if Host is looking at this image
+            if (activeImageFile.current === payload.imageName) {
+              const loaded = parseYoloData(payload.text, viewState.current.imgWidth, viewState.current.imgHeight);
+              setAnnotations(loaded);
+              drawCanvas();
+              setStatus('🔄 Real-time annotations updated by teammate.', 'var(--accent-amber)');
+            } else {
+              setStatus(`💾 Saved teammate annotations for ${payload.imageName} to local disk.`, 'var(--accent-green)');
+            }
+          } catch (err) {
+            console.error('Failed to write guest annotations:', err);
+          }
+        }
+      });
+
+      conn.on('close', () => {
+        connectionsRef.current = connectionsRef.current.filter(c => c !== conn);
+        setConnectedPeersCount(connectionsRef.current.filter(c => c.open).length);
+        setStatus('Teammate disconnected.', 'var(--txt-muted)');
+      });
+
+      conn.on('error', (err) => {
+        console.error('Connection error:', err);
+      });
+    });
+
+    peer.on('error', (err) => {
+      console.error('Peer error:', err);
+      setStatus(`❌ P2P Host Error: ${err.message}`, 'var(--accent-red)');
+    });
+  };
+
+  const startP2PGuest = (roomId) => {
+    if (typeof window === 'undefined' || !window.Peer) {
+      alert('P2P library is still loading, please try again.');
+      return;
+    }
+
+    setStatus('🌐 Connecting to teammate host session...', 'var(--accent-amber)');
+    setP2pRole('guest');
+    setP2pActive(true);
+    setP2pRoomId(roomId);
+
+    const peer = new window.Peer();
+    peerRef.current = peer;
+
+    peer.on('open', (id) => {
+      const conn = peer.connect(roomId);
+      connectionsRef.current = [conn];
+
+      conn.on('open', () => {
+        setStatus('⚡ Connected directly to teammate host browser!', 'var(--accent-green)');
+        setConnectedPeersCount(1);
+      });
+
+      conn.on('data', (payload) => {
+        if (payload.type === 'IMAGES_LIST') {
+          setImages(payload.images);
+          if (payload.images.length > 0) {
+            setCurrentImageIndex(0);
+          }
+        } else if (payload.type === 'IMAGE_RESPONSE') {
+          if (activeImageFile.current !== payload.imageName) return;
+
+          const img = new Image();
+          img.src = payload.base64;
+          img.onload = () => {
+            currentImageRef.current = img;
+            viewState.current.imgWidth = img.width;
+            viewState.current.imgHeight = img.height;
+            fitImageToCanvas(img.width, img.height);
+
+            // Now request annotations
+            conn.send({
+              type: 'REQUEST_ANNOTATIONS',
+              imageName: payload.imageName
+            });
+          };
+        } else if (payload.type === 'SYNC_ANNOTATIONS') {
+          if (activeImageFile.current !== payload.imageName) return;
+          const loaded = parseYoloData(payload.text, viewState.current.imgWidth, viewState.current.imgHeight);
+          setAnnotations(loaded);
+          drawCanvas();
+          setStatus(`Loaded annotations for ${payload.imageName}.`, 'var(--accent-blue)');
+        }
+      });
+
+      conn.on('close', () => {
+        setStatus('❌ Connection to host lost.', 'var(--accent-red)');
+        setConnectedPeersCount(0);
+      });
+
+      conn.on('error', (err) => {
+        console.error('Connection error:', err);
+        setStatus(`❌ Connection error: ${err.message}`, 'var(--accent-red)');
+      });
+    });
+
+    peer.on('error', (err) => {
+      console.error('Peer error:', err);
+      setStatus(`❌ P2P Client Error: ${err.type === 'peer-not-found' ? 'Host session not found. Verify the invite link.' : err.message}`, 'var(--accent-red)');
+    });
+  };
+
+  const stopP2PSync = () => {
+    connectionsRef.current.forEach(conn => conn.close());
+    connectionsRef.current = [];
+    if (peerRef.current) {
+      peerRef.current.destroy();
+      peerRef.current = null;
+    }
+    setP2pActive(false);
+    setP2pRoomId('');
+    setP2pRole('');
+    setConnectedPeersCount(0);
+    setStatus('🌐 Direct P2P Sync disabled.', 'var(--txt-muted)');
   };
 
   // --- Delete Last Annotation ---
@@ -391,6 +699,20 @@ export default function Home() {
 
     activeImageFile.current = imgObj.name;
 
+    if (p2pRoleRef.current === 'guest') {
+      // --- P2P GUEST MODE: Request image from host browser ---
+      connectionsRef.current.forEach(conn => {
+        if (conn.open) {
+          conn.send({
+            type: 'REQUEST_IMAGE',
+            imageName: imgObj.name
+          });
+        }
+      });
+      return;
+    }
+
+    // --- STANDARD MODE: Load from local File Handle ---
     imgObj.handle.getFile().then(file => {
       const url = URL.createObjectURL(file);
       const img = new Image();
@@ -1102,30 +1424,97 @@ export default function Home() {
         <aside className="sidebar">
           {/* Quick Actions */}
           <div className="section-title">QUICK ACTIONS</div>
-          <button className="btn-primary" onClick={selectDirectory} style={{ marginBottom: '8px' }}>
-            📂 Select Project Directory
-          </button>
+          
+          {p2pRole !== 'guest' ? (
+            <button className="btn-primary" onClick={selectDirectory} style={{ marginBottom: '8px' }}>
+              📂 Select Project Directory
+            </button>
+          ) : (
+            <div style={{ padding: '8px 12px', borderRadius: '4px', background: 'rgba(0, 122, 204, 0.15)', border: '1px solid var(--accent-blue)', color: 'var(--txt-primary)', fontSize: '12.5px', fontWeight: 'bold', textAlign: 'center', marginBottom: '8px' }}>
+              ⚡ P2P Active: Teammate View
+            </div>
+          )}
 
           <button className="btn-secondary" onClick={copyInviteLink} style={{ marginBottom: '8px', border: '1px dashed var(--accent-blue)', color: 'var(--accent-blue-hover)' }}>
             👥 Copy Teammate Invite Link
           </button>
           
           <div className="action-grid-2x2">
-            <button className="btn-secondary" onClick={convertPdfToJpg}>
-              📕 Convert PDF
-            </button>
-            <button className="btn-secondary" onClick={saveAnnotations}>
+            {p2pRole !== 'guest' && (
+              <button className="btn-secondary" onClick={convertPdfToJpg}>
+                📕 Convert PDF
+              </button>
+            )}
+            <button className="btn-secondary" onClick={saveAnnotations} style={p2pRole === 'guest' ? { gridColumn: 'span 2' } : {}}>
               💾 Save Labels
             </button>
           </div>
           
-          <button className="btn-green" onClick={exportAnnotatedImage} style={{ marginBottom: '4px' }}>
-            📤 Export Single Drawing
-          </button>
-          
-          <button className="btn-primary" onClick={exportYoloDataset} style={{ marginBottom: '8px', backgroundColor: 'var(--accent-green)' }}>
-            📦 Export Dataset Package
-          </button>
+          {p2pRole !== 'guest' && (
+            <>
+              <button className="btn-green" onClick={exportAnnotatedImage} style={{ marginBottom: '4px' }}>
+                📤 Export Single Drawing
+              </button>
+              
+              <button className="btn-primary" onClick={exportYoloDataset} style={{ marginBottom: '8px', backgroundColor: 'var(--accent-green)' }}>
+                📦 Export Dataset Package
+              </button>
+            </>
+          )}
+
+          {/* P2P WebRTC Direct Sync Controls */}
+          {directoryHandle && p2pRole !== 'guest' && (
+            <div style={{ marginTop: '4px', marginBottom: '12px', padding: '12px', borderRadius: '4px', backgroundColor: 'var(--bg-card)', border: '1px solid var(--bg-border)' }}>
+              <div className="section-title" style={{ marginTop: 0, marginBottom: '6px' }}>🌐 Direct Browser P2P Sync</div>
+              {!p2pActive ? (
+                <>
+                  <p style={{ fontSize: '11px', color: 'var(--txt-muted)', marginBottom: '8px', lineHeight: '1.4' }}>
+                    Invite teammates to collaborate browser-to-browser with no cloud storage limits. They can view and draw on your files, and annotations will save directly to your folder!
+                  </p>
+                  <button className="btn-primary" onClick={startP2PHost} style={{ backgroundColor: 'var(--accent-green)' }}>
+                    🌐 Start Direct P2P Sync
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '8px' }}>
+                    <div style={{ fontSize: '11.5px', color: 'var(--accent-green-hover)', fontWeight: 'bold' }}>
+                      🟢 P2P Active (Host Mode)
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--txt-muted)' }}>
+                      Room ID: <code style={{ color: 'var(--accent-amber)', fontSize: '10px' }}>{p2pRoomId}</code>
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--txt-muted)' }}>
+                      Connected Teammates: <strong style={{ color: '#fff' }}>{connectedPeersCount}</strong>
+                    </div>
+                  </div>
+                  <button className="btn-secondary" onClick={stopP2PSync} style={{ color: 'var(--accent-red)', border: '1px solid rgba(255, 59, 48, 0.3)', width: '100%' }}>
+                    🔴 Stop P2P Sync
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+
+          {p2pRole === 'guest' && (
+            <div style={{ marginTop: '4px', marginBottom: '12px', padding: '12px', borderRadius: '4px', backgroundColor: 'var(--bg-card)', border: '1px solid var(--bg-border)' }}>
+              <div className="section-title" style={{ marginTop: 0, marginBottom: '6px' }}>⚡ Direct P2P Connection</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '8px' }}>
+                <div style={{ fontSize: '11.5px', color: 'var(--accent-blue-hover)', fontWeight: 'bold' }}>
+                  🟢 Connected as Guest
+                </div>
+                <div style={{ fontSize: '11px', color: 'var(--txt-muted)' }}>
+                  Room: <code style={{ color: 'var(--accent-amber)', fontSize: '10px' }}>{p2pRoomId}</code>
+                </div>
+                <div style={{ fontSize: '11px', color: 'var(--txt-muted)', lineHeight: '1.4', marginTop: '4px' }}>
+                  All changes you make save directly to Host's computer folder in real time!
+                </div>
+              </div>
+              <button className="btn-secondary" onClick={stopP2PSync} style={{ color: 'var(--accent-red)', border: '1px solid rgba(255, 59, 48, 0.3)', width: '100%' }}>
+                🔴 Disconnect P2P Sync
+              </button>
+            </div>
+          )}
 
 
 
@@ -1179,7 +1568,7 @@ export default function Home() {
 
         {/* CAD Blueprint Drawing Workspace */}
         <main className="canvas-workspace">
-          {directoryHandle && (
+          {(directoryHandle || p2pRole === 'guest') && (
             <div className="canvas-toolbar">
               <button 
                 className={`toolbar-btn ${activeTool === 'draw' ? 'active' : ''}`}
@@ -1233,7 +1622,7 @@ export default function Home() {
           )}
 
           {/* Web Engine Viewport Canvas */}
-          {!directoryHandle ? (
+          {(!directoryHandle && p2pRole !== 'guest') ? (
             <div className="no-directory-overlay">
               <h2 className="no-directory-title">Collaborative Engineering Annotation Tool</h2>
               <p className="no-directory-subtitle">
@@ -1291,16 +1680,40 @@ export default function Home() {
               You have been invited to collaborate on the project: <strong style={{ color: 'var(--accent-amber)' }}>{invitedProjectName}</strong>!
             </p>
             <p className="modal-body" style={{ fontSize: '12.5px', marginBottom: '16px', lineHeight: '1.5' }}>
-              This system is fully serverless. Your drawings remain private in your local project folder (synced via OneDrive, Dropbox, or LAN). Multiple team members can work on different drawings inside the same folder simultaneously.
+              This system is fully serverless. Drawings can be synchronized via your local folder, or connected directly browser-to-browser to collaborate instantly with no cloud account limits.
             </p>
             
+            {invitedP2pRoomId ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '20px', padding: '14px', borderRadius: '6px', background: 'rgba(0, 122, 204, 0.1)', border: '1px solid rgba(0, 122, 204, 0.25)' }}>
+                <div>
+                  <span style={{ backgroundColor: 'var(--accent-blue)', color: '#fff', fontSize: '9px', fontWeight: 'bold', padding: '2px 6px', borderRadius: '10px', textTransform: 'uppercase', display: 'inline-block', marginBottom: '6px' }}>
+                    ⚡ Direct WebRTC Connection Available
+                  </span>
+                  <h4 style={{ fontSize: '13px', fontWeight: '700', marginBottom: '4px' }}>Connect Browser-to-Browser</h4>
+                  <p style={{ fontSize: '12px', color: 'var(--txt-muted)', lineHeight: '1.4' }}>
+                    Collaborate directly with the host browser over a zero-cloud peer-to-peer sync. Drawings will stream dynamically, and all your annotation changes will save directly onto the host's computer folder!
+                  </p>
+                </div>
+                <button
+                  className="btn-primary"
+                  onClick={() => {
+                    startP2PGuest(invitedP2pRoomId);
+                    setShowOnboarding(false);
+                  }}
+                  style={{ backgroundColor: 'var(--accent-blue-hover)', color: '#ffffff', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                >
+                  ⚡ Connect via Direct P2P Link & Begin
+                </button>
+              </div>
+            ) : null}
+
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '20px' }}>
               <div>
                 <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', color: 'var(--txt-muted)', marginBottom: '4px', textTransform: 'uppercase' }}>
-                  Sync Local Project Folder
+                  Option B: Sync Local Project Folder
                 </label>
                 <p style={{ fontSize: '12px', color: 'var(--txt-muted)', marginBottom: '8px' }}>
-                  Choose your local synced copy of the project folder. Once granted access, the tool will instantly connect and load all files.
+                  If you have a local copy synced via OneDrive/Dropbox, choose the folder to scan files.
                 </p>
                 <button
                   className="btn-primary"
