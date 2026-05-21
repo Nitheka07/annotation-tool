@@ -3,24 +3,16 @@ import Head from 'next/head';
 
 // --- Category Design Tokens & Key Binds ---
 const CLASSES = {
-  '1': { name: 'linear_dim', color: '#00E5FF', id: 0 },
-  '2': { name: 'diameter_dim', color: '#00E676', id: 1 },
-  '3': { name: 'radius_dim', color: '#AEEA00', id: 2 },
-  '4': { name: 'angle_dim', color: '#FFD600', id: 3 },
-  '5': { name: 'limit_dim', color: '#FF9100', id: 4 },
-  '6': { name: 'tolerance_dim', color: '#FF4081', id: 5 },
-  '7': { name: 'gdt_frame', color: '#FF1744', id: 6 },
-  '8': { name: 'reference_dim', color: '#2979FF', id: 7 },
-  '9': { name: 'thread_callout', color: '#D500F9', id: 8 },
-  '0': { name: 'surface_finish', color: '#00BFA5', id: 9 },
-  't': { name: 'title_block', color: '#FFAB00', id: 10 },
-  'n': { name: 'notes', color: '#FF6E40', id: 11 }
+  '1': { name: 'dimensions', color: '#00E5FF', id: 0 },
+  '2': { name: 'angles', color: '#FFD600', id: 1 },
+  '3': { name: 'surface', color: '#00BFA5', id: 2 },
+  '4': { name: 'title', color: '#FFAB00', id: 3 },
+  '5': { name: 'note', color: '#FF6E40', id: 4 },
+  '6': { name: 'gd&t', color: '#FF1744', id: 5 }
 };
 
 const CLASS_ORDER = [
-  'linear_dim', 'diameter_dim', 'radius_dim', 'angle_dim',
-  'limit_dim', 'tolerance_dim', 'gdt_frame', 'reference_dim',
-  'thread_callout', 'surface_finish', 'title_block', 'notes'
+  'dimensions', 'angles', 'surface', 'title', 'note', 'gd&t'
 ];
 
 const CLASSES_BY_NAME = Object.entries(CLASSES).reduce((acc, [key, val]) => {
@@ -43,6 +35,13 @@ export default function Home() {
   useEffect(() => {
     hasYoloStructureRef.current = hasYoloStructure;
   }, [hasYoloStructure]);
+
+  const [selectedAnnotationIndex, setSelectedAnnotationIndex] = useState(-1);
+  const selectedAnnotationIndexRef = useRef(-1);
+
+  useEffect(() => {
+    selectedAnnotationIndexRef.current = selectedAnnotationIndex;
+  }, [selectedAnnotationIndex]);
   
   // Tool navigation: Draw Mode vs Pan Mode
   const [activeTool, setActiveTool] = useState('draw'); // 'draw' or 'pan'
@@ -771,14 +770,32 @@ export default function Home() {
     setStatus('🌐 Direct P2P Sync disabled.', 'var(--txt-muted)');
   };
 
-  // --- Delete Last Annotation ---
+  // --- Delete Last or Selected Annotation ---
   const deleteLastAnnotation = () => {
+    if (selectedAnnotationIndexRef.current !== -1) {
+      const targetIdx = selectedAnnotationIndexRef.current;
+      if (targetIdx >= 0 && targetIdx < activeAnnotations.current.length) {
+        const copy = [...activeAnnotations.current];
+        const deletedClass = copy[targetIdx].class;
+        copy.splice(targetIdx, 1);
+        setAnnotations(copy);
+        setSelectedAnnotationIndex(-1);
+        setStatus(`🗑️ Deleted selected ${deletedClass} annotation.`, 'var(--accent-amber)');
+        
+        // Auto-save changes immediately
+        setTimeout(() => {
+          saveAnnotations();
+          drawCanvas();
+        }, 0);
+        return;
+      }
+    }
 
     if (activeAnnotations.current.length > 0) {
       const copy = [...activeAnnotations.current];
-      copy.pop();
+      const popped = copy.pop();
       setAnnotations(copy);
-      setStatus('↩️ Deleted last drawn annotation.', 'var(--accent-amber)');
+      setStatus(`↩️ Deleted last drawn ${popped.class} annotation.`, 'var(--accent-amber)');
       
       // Auto-save changes immediately
       setTimeout(() => {
@@ -807,6 +824,7 @@ export default function Home() {
 
   // --- Load and Render Image in Viewport Engine ---
   useEffect(() => {
+    setSelectedAnnotationIndex(-1);
     if (currentImageIndex === -1 || images.length === 0) {
       // Clear canvas if no drawings
       currentImageRef.current = null;
@@ -905,13 +923,39 @@ export default function Home() {
     ctx.drawImage(img, 0, 0);
 
     // Draw bounding boxes
-    activeAnnotations.current.forEach(ann => {
+    activeAnnotations.current.forEach((ann, idx) => {
       const [x0, y0, x1, y1] = ann.box;
       
       // Scale lines to look sharp at any zoom level
       ctx.lineWidth = Math.max(1, 2 / scale);
       ctx.strokeStyle = ann.color;
       ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+
+      // Render custom dashed borders and solid corner-handles if selected
+      if (idx === selectedAnnotationIndexRef.current) {
+        ctx.save();
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = Math.max(1.5, 2.5 / scale);
+        ctx.setLineDash([Math.max(2, 4 / scale), Math.max(2, 4 / scale)]);
+        ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+        ctx.restore();
+
+        // 4 Solid corner handles
+        const hs = Math.max(4, 6 / scale);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.strokeStyle = ann.color;
+        ctx.lineWidth = Math.max(1, 1.5 / scale);
+        const corners = [
+          [x0, y0],
+          [x1, y0],
+          [x0, y1],
+          [x1, y1]
+        ];
+        corners.forEach(([cx, cy]) => {
+          ctx.fillRect(cx - hs, cy - hs, hs * 2, hs * 2);
+          ctx.strokeRect(cx - hs, cy - hs, hs * 2, hs * 2);
+        });
+      }
 
       // Draw label badges
       ctx.fillStyle = ann.color;
@@ -929,6 +973,20 @@ export default function Home() {
       ctx.fillStyle = ann.color === '#FFD600' ? '#000000' : '#FFFFFF';
       ctx.fillText(badgeText, x0, y0);
     });
+
+    // Update bottom status coordinate tracker & selected item text on every draw
+    const mx = viewState.current.mouseX;
+    const my = viewState.current.mouseY;
+    const imgX = Math.max(0, Math.min(Math.round((mx - offsetX) / scale), viewState.current.imgWidth));
+    const imgY = Math.max(0, Math.min(Math.round((my - offsetY) / scale), viewState.current.imgHeight));
+    const zoomPct = Math.round(scale * 100);
+    const selIdx = selectedAnnotationIndexRef.current;
+    const selText = selIdx !== -1 ? ` | Selected: ${activeAnnotations.current[selIdx]?.class} (Press Backspace to delete)` : '';
+
+    const statusCoordEl = document.getElementById('status-coord');
+    if (statusCoordEl) {
+      statusCoordEl.innerText = `Zoom: ${zoomPct}% | Image Coordinates: ${imgX}, ${imgY}${selText}`;
+    }
 
     // Draw live drag rectangle preview if drawing
     if (viewState.current.isDrawing) {
@@ -1003,7 +1061,9 @@ export default function Home() {
     
     // Live update coordinates
     const zoomPct = Math.round(scale * 100);
-    document.getElementById('status-coord').innerText = `Zoom: ${zoomPct}% | Image Coordinates: ${imgX}, ${imgY}`;
+    const selIdx = selectedAnnotationIndexRef.current;
+    const selText = selIdx !== -1 ? ` | Selected: ${activeAnnotations.current[selIdx]?.class} (Press Backspace to delete)` : '';
+    document.getElementById('status-coord').innerText = `Zoom: ${zoomPct}% | Image Coordinates: ${imgX}, ${imgY}${selText}`;
   };
 
   const handleMouseUp = (e) => {
@@ -1015,39 +1075,72 @@ export default function Home() {
       
       const { scale, offsetX, offsetY, drawStartX, drawStartY, mouseX, mouseY, imgWidth, imgHeight } = viewState.current;
       
-      // Convert start and end points to original image coordinate space
-      const x0_img = (drawStartX - offsetX) / scale;
-      const y0_img = (drawStartY - offsetY) / scale;
-      const x1_img = (mouseX - offsetX) / scale;
-      const y1_img = (mouseY - offsetY) / scale;
+      // Calculate drag distance in client screen coordinates to distinguish click/tap from drag/draw
+      const dx = mouseX - drawStartX;
+      const dy = mouseY - drawStartY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
 
-      const rx0 = Math.max(0, Math.min(x0_img, imgWidth));
-      const ry0 = Math.max(0, Math.min(y0_img, imgHeight));
-      const rx1 = Math.max(0, Math.min(x1_img, imgWidth));
-      const ry1 = Math.max(0, Math.min(y1_img, imgHeight));
+      if (dist < 5) {
+        // Selection/Deselection via Tap Click
+        const rect = canvasRef.current.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        const imgX = (mx - offsetX) / scale;
+        const imgY = (my - offsetY) / scale;
 
-      const bx0 = Math.min(rx0, rx1);
-      const by0 = Math.min(ry0, ry1);
-      const bx1 = Math.max(rx0, rx1);
-      const by1 = Math.max(ry0, ry1);
+        let clickedIdx = -1;
+        // Search backwards so that we select overlapping elements in a top-down layer order
+        for (let i = activeAnnotations.current.length - 1; i >= 0; i--) {
+          const ann = activeAnnotations.current[i];
+          const [bx0, by0, bx1, by1] = ann.box;
+          if (imgX >= bx0 && imgX <= bx1 && imgY >= by0 && imgY <= by1) {
+            clickedIdx = i;
+            break;
+          }
+        }
 
-      // Validate rect size to avoid registration of accidental clicks
-      if (bx1 - bx0 > 4 && by1 - by0 > 4) {
-        const activeClass = CLASSES[activeClassKey];
-        const newAnn = {
-          class: activeClass.name,
-          color: activeClass.color,
-          box: [bx0, by0, bx1, by1]
-        };
-
-        const copy = [...activeAnnotations.current, newAnn];
-        setAnnotations(copy);
+        setSelectedAnnotationIndex(clickedIdx);
         
-        // Auto-save changes immediately
+        // Re-draw immediately to update highlight boxes and selection coordinate texts
         setTimeout(() => {
-          saveAnnotations();
           drawCanvas();
         }, 0);
+      } else {
+        // Convert start and end points to original image coordinate space
+        const x0_img = (drawStartX - offsetX) / scale;
+        const y0_img = (drawStartY - offsetY) / scale;
+        const x1_img = (mouseX - offsetX) / scale;
+        const y1_img = (mouseY - offsetY) / scale;
+
+        const rx0 = Math.max(0, Math.min(x0_img, imgWidth));
+        const ry0 = Math.max(0, Math.min(y0_img, imgHeight));
+        const rx1 = Math.max(0, Math.min(x1_img, imgWidth));
+        const ry1 = Math.max(0, Math.min(y1_img, imgHeight));
+
+        const bx0 = Math.min(rx0, rx1);
+        const by0 = Math.min(ry0, ry1);
+        const bx1 = Math.max(rx0, rx1);
+        const by1 = Math.max(ry0, ry1);
+
+        // Validate rect size to avoid registration of accidental clicks
+        if (bx1 - bx0 > 4 && by1 - by0 > 4) {
+          const activeClass = CLASSES[activeClassKey];
+          const newAnn = {
+            class: activeClass.name,
+            color: activeClass.color,
+            box: [bx0, by0, bx1, by1]
+          };
+
+          const copy = [...activeAnnotations.current, newAnn];
+          setAnnotations(copy);
+          setSelectedAnnotationIndex(-1); // Deselect on creating a new box
+          
+          // Auto-save changes immediately
+          setTimeout(() => {
+            saveAnnotations();
+            drawCanvas();
+          }, 0);
+        }
       }
     }
   };
