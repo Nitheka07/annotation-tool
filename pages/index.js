@@ -38,6 +38,29 @@ export default function Home() {
   const [statusMessage, setStatusMessage] = useState('Ready. Select a project folder containing drawings to begin.');
   const [statusColor, setStatusColor] = useState('var(--txt-muted)');
   
+  // Tool navigation: Draw Mode vs Pan Mode
+  const [activeTool, setActiveTool] = useState('draw'); // 'draw' or 'pan'
+  const activeToolRef = useRef('draw');
+  const spacePressed = useRef(false);
+  const [canvasCursor, setCanvasCursor] = useState('crosshair');
+  
+  // Navigation scrolling configuration: 'zoom' (Mouse Scroll Zoom) vs 'pan' (Trackpad Pan)
+  const [scrollMode, setScrollMode] = useState('pan');
+  const scrollModeRef = useRef('pan');
+
+  useEffect(() => {
+    scrollModeRef.current = scrollMode;
+  }, [scrollMode]);
+
+  const updateCursor = (panningOverride = null) => {
+    const panning = panningOverride !== null ? panningOverride : viewState.current.isPanning;
+    if (spacePressed.current || activeToolRef.current === 'pan') {
+      setCanvasCursor(panning ? 'grabbing' : 'grab');
+    } else {
+      setCanvasCursor('crosshair');
+    }
+  };
+  
   // PDF converting state overlay
   const [pdfConverting, setPdfConverting] = useState(false);
   const [pdfMessage, setPdfMessage] = useState('');
@@ -494,12 +517,13 @@ export default function Home() {
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
 
-    if (e.button === 2 || e.button === 1) {
-      // Right-Click or Middle-Click Panning
+    if (e.button === 2 || e.button === 1 || activeToolRef.current === 'pan' || spacePressed.current) {
+      // Panning active (Right-click, middle-click, spacebar drag, or hand tool)
       e.preventDefault();
       viewState.current.isPanning = true;
       viewState.current.panStartX = mx - viewState.current.offsetX;
       viewState.current.panStartY = my - viewState.current.offsetY;
+      updateCursor(true);
     } else if (e.button === 0) {
       // Left-Click Drawing
       viewState.current.isDrawing = true;
@@ -541,8 +565,9 @@ export default function Home() {
   };
 
   const handleMouseUp = (e) => {
-    if (e.button === 2 || e.button === 1) {
+    if (e.button === 2 || e.button === 1 || activeToolRef.current === 'pan' || spacePressed.current) {
       viewState.current.isPanning = false;
+      updateCursor(false);
     } else if (e.button === 0 && viewState.current.isDrawing) {
       viewState.current.isDrawing = false;
       
@@ -585,7 +610,7 @@ export default function Home() {
     }
   };
 
-  // Viewport Zooming (follows browser mouse cursor)
+  // Viewport Zooming (follows browser mouse cursor with ultra-smooth delta scaling)
   const handleWheel = (e) => {
     e.preventDefault();
     if (!currentImageRef.current) return;
@@ -596,18 +621,42 @@ export default function Home() {
     const my = e.clientY - rect.top;
 
     const { scale, offsetX, offsetY } = viewState.current;
-    
-    // Coordinates on full image before zoom
-    const imgX = (mx - offsetX) / scale;
-    const imgY = (my - offsetY) / scale;
 
-    const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
-    const newScale = Math.max(0.05, Math.min(50.0, scale * zoomFactor));
+    // Check configuration mode via ref to guarantee fresh values
+    if (scrollModeRef.current === 'zoom') {
+      // --- MOUSE MODE: Scroll to Zoom ---
+      const imgX = (mx - offsetX) / scale;
+      const imgY = (my - offsetY) / scale;
 
-    // Align offset to lock cursor position
-    viewState.current.scale = newScale;
-    viewState.current.offsetX = mx - imgX * newScale;
-    viewState.current.offsetY = my - imgY * newScale;
+      const delta = e.deltaY;
+      // Ultra-smooth dynamic zoom factor in log space
+      const zoomFactor = Math.max(0.7, Math.min(1.4, Math.exp(-delta * 0.002)));
+      const newScale = Math.max(0.05, Math.min(50.0, scale * zoomFactor));
+
+      viewState.current.scale = newScale;
+      viewState.current.offsetX = mx - imgX * newScale;
+      viewState.current.offsetY = my - imgY * newScale;
+    } else {
+      // --- TRACKPAD MODE: Scroll/Swipe to Pan, Pinch/Ctrl to Zoom ---
+      if (e.ctrlKey) {
+        // Pinch-to-zoom or Ctrl + Scroll
+        const imgX = (mx - offsetX) / scale;
+        const imgY = (my - offsetY) / scale;
+
+        const delta = e.deltaY;
+        // Premium smooth zoom factor optimized specifically for high-speed trackpad gestures
+        const zoomFactor = Math.max(0.7, Math.min(1.4, Math.exp(-delta * 0.008)));
+        const newScale = Math.max(0.05, Math.min(50.0, scale * zoomFactor));
+
+        viewState.current.scale = newScale;
+        viewState.current.offsetX = mx - imgX * newScale;
+        viewState.current.offsetY = my - imgY * newScale;
+      } else {
+        // Horizontal and vertical two-finger trackpad panning or mouse scroll vertical panning
+        viewState.current.offsetX -= e.deltaX;
+        viewState.current.offsetY -= e.deltaY;
+      }
+    }
 
     drawCanvas();
   };
@@ -642,11 +691,35 @@ export default function Home() {
       const activeTag = document.activeElement?.tagName.toLowerCase();
       if (activeTag === 'input' || activeTag === 'textarea') return;
 
+      // Intercept Spacebar for temporary panning
+      if (e.code === 'Space') {
+        e.preventDefault();
+        if (!spacePressed.current) {
+          spacePressed.current = true;
+          updateCursor();
+        }
+        return;
+      }
+
       const key = e.key.toLowerCase();
       
-      // Swap category hotkeys
-      if (CLASSES[key]) {
+      // Switch active drawing/panning tools
+      if (key === 'h') {
+        setActiveTool('pan');
+        activeToolRef.current = 'pan';
+        updateCursor();
+        setStatus('✋ Tool Swapped to: Pan/Move Mode (H)', 'var(--txt-primary)');
+      } else if (key === 'd' || key === 'a') {
+        setActiveTool('draw');
+        activeToolRef.current = 'draw';
+        updateCursor();
+        setStatus('✏️ Tool Swapped to: Bounding Box Drawing Mode (D)', 'var(--txt-primary)');
+      } else if (CLASSES[key]) {
+        // Automatically switch back to draw mode when selecting annotation classes
+        setActiveTool('draw');
+        activeToolRef.current = 'draw';
         setActiveClassKey(key);
+        updateCursor();
         setStatus(`🎯 Selected Annotation Class: '${CLASSES[key].name}'`, 'var(--txt-primary)');
       } else if (e.key === 'Backspace') {
         deleteLastAnnotation();
@@ -657,8 +730,20 @@ export default function Home() {
       }
     };
 
+    const handleKeyUp = (e) => {
+      if (e.code === 'Space') {
+        e.preventDefault();
+        spacePressed.current = false;
+        updateCursor();
+      }
+    };
+
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
   }, [currentImageIndex, images]);
 
   // --- Navigations ---
@@ -1094,7 +1179,58 @@ export default function Home() {
 
         {/* CAD Blueprint Drawing Workspace */}
         <main className="canvas-workspace">
+          {directoryHandle && (
+            <div className="canvas-toolbar">
+              <button 
+                className={`toolbar-btn ${activeTool === 'draw' ? 'active' : ''}`}
+                onClick={() => {
+                  setActiveTool('draw');
+                  activeToolRef.current = 'draw';
+                  updateCursor();
+                  setStatus('✏️ Bounding Box Drawing Mode (D)');
+                }}
+                title="Drawing Tool (Press 'D' or 'A')"
+              >
+                ✏️ Draw Box
+              </button>
+              <button 
+                className={`toolbar-btn ${activeTool === 'pan' ? 'active' : ''}`}
+                onClick={() => {
+                  setActiveTool('pan');
+                  activeToolRef.current = 'pan';
+                  updateCursor();
+                  setStatus('✋ Pan / Move Mode (H) - Hold [Spacebar] to temporarily pan');
+                }}
+                title="Pan/Move Tool (Press 'H' or Hold [Spacebar])"
+              >
+                ✋ Move
+              </button>
 
+              {/* Premium Visual Divider */}
+              <div style={{ width: '1px', background: 'rgba(255, 255, 255, 0.15)', margin: '4px 6px' }} />
+
+              <button 
+                className={`toolbar-btn ${scrollMode === 'pan' ? 'active' : ''}`}
+                onClick={() => {
+                  setScrollMode('pan');
+                  setStatus('💻 Scroll Mode: Trackpad Pan (2-finger swipe to pan, pinch/Ctrl+scroll to zoom)', 'var(--accent-blue-hover)');
+                }}
+                title="Trackpad Mode: Two-finger swipe to pan, pinch-to-zoom"
+              >
+                💻 Trackpad Pan
+              </button>
+              <button 
+                className={`toolbar-btn ${scrollMode === 'zoom' ? 'active' : ''}`}
+                onClick={() => {
+                  setScrollMode('zoom');
+                  setStatus('🖱️ Scroll Mode: Mouse Zoom (Scroll wheel to zoom, drag/Space to pan)', 'var(--accent-blue-hover)');
+                }}
+                title="Mouse Mode: Scroll wheel zooms directly, drag to pan"
+              >
+                🖱️ Mouse Zoom
+              </button>
+            </div>
+          )}
 
           {/* Web Engine Viewport Canvas */}
           {!directoryHandle ? (
@@ -1117,6 +1253,7 @@ export default function Home() {
               onMouseUp={handleMouseUp}
               onContextMenu={(e) => e.preventDefault()}
               onWheel={handleWheel}
+              style={{ cursor: canvasCursor }}
             />
           )}
         </main>

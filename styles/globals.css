@@ -412,3 +412,48 @@ body, html {
   max-width: 440px;
   margin-bottom: 24px;
 }
+
+/* Canvas Floating Toolbar */
+.canvas-toolbar {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(30, 30, 30, 0.75);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 4px;
+  display: flex;
+  gap: 4px;
+  z-index: 20;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+}
+
+.toolbar-btn {
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--txt-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.toolbar-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--txt-primary);
+}
+
+.toolbar-btn.active {
+  background: var(--accent-blue);
+  color: #ffffff;
+}
+

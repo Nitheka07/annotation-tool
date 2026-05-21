@@ -77,8 +77,12 @@ Pressing keys `1`–`0`, `T`, or `N` swaps active classes dynamically:
 * **`Backspace`**: Undo / Delete the last annotation.
 * **`Right Arrow`**: Move to the next drawing.
 * **`Left Arrow`**: Move to the previous drawing.
-* **`Right-Click & Drag`** or **`Middle-Click & Drag`**: Pan the blueprint around the workspace.
-* **`Mouse Scroll Wheel`**: Zoom in/out smoothly centered on your mouse cursor.
+* **`D` / `A`**: Toggle Bounding Box Drawing Mode.
+* **`H`**: Toggle Hand/Pan Mode.
+* **`Spacebar` (Hold)**: Temporary Pan Mode (swap to grab to easily slide the blueprint with left-click drag).
+* **💻 Trackpad Pan Mode**: Two-finger swipe to pan vertically/horizontally, pinch-to-zoom (or `Ctrl` + scroll) to zoom smoothly.
+* **🖱️ Mouse Zoom Mode**: Scroll wheel directly zooms in/out, right-click or middle-click and drag to pan.
+* **Select/Toggle Modes**: Choose between **💻 Trackpad Pan** and **🖱️ Mouse Zoom** on-the-fly using the floating canvas toolbar!
 
 ---
 
