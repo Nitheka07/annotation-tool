@@ -8,11 +8,12 @@ const CLASSES = {
   '3': { name: 'surface', color: '#00BFA5', id: 2 },
   '4': { name: 'title', color: '#FFAB00', id: 3 },
   '5': { name: 'note', color: '#FF6E40', id: 4 },
-  '6': { name: 'gd&t', color: '#FF1744', id: 5 }
+  '6': { name: 'gd&t', color: '#FF1744', id: 5 },
+  '7': { name: 'thread', color: '#D500F9', id: 6 }
 };
 
 const CLASS_ORDER = [
-  'dimensions', 'angles', 'surface', 'title', 'note', 'gd&t'
+  'dimensions', 'angles', 'surface', 'title', 'note', 'gd&t', 'thread'
 ];
 
 const CLASSES_BY_NAME = Object.entries(CLASSES).reduce((acc, [key, val]) => {
