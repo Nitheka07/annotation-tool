@@ -3,17 +3,18 @@ import Head from 'next/head';
 
 // --- Category Design Tokens & Key Binds ---
 const CLASSES = {
-  '1': { name: 'dimensions', color: '#00E5FF', id: 0 },
-  '2': { name: 'angles', color: '#FFD600', id: 1 },
-  '3': { name: 'surface', color: '#00BFA5', id: 2 },
-  '4': { name: 'title', color: '#FFAB00', id: 3 },
-  '5': { name: 'note', color: '#FF6E40', id: 4 },
-  '6': { name: 'gd&t', color: '#FF1744', id: 5 },
-  '7': { name: 'thread', color: '#D500F9', id: 6 }
+  '1': { name: 'diameter', color: '#00E5FF', id: 0 },
+  '2': { name: 'radius', color: '#00E676', id: 1 },
+  '3': { name: 'distance', color: '#00BFA5', id: 2 },
+  '4': { name: 'angle', color: '#FFD600', id: 3 },
+  '5': { name: 'Surf', color: '#FF6E40', id: 4 },
+  '6': { name: 'GDT', color: '#FF1744', id: 5 },
+  '7': { name: 'thread', color: '#D500F9', id: 6 },
+  '8': { name: 'note', color: '#FFAB00', id: 7 }
 };
 
 const CLASS_ORDER = [
-  'dimensions', 'angles', 'surface', 'title', 'note', 'gd&t', 'thread'
+  'diameter', 'radius', 'distance', 'angle', 'Surf', 'GDT', 'thread', 'note'
 ];
 
 const CLASSES_BY_NAME = Object.entries(CLASSES).reduce((acc, [key, val]) => {
