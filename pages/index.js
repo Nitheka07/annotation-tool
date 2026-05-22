@@ -475,13 +475,15 @@ export default function Home() {
   };
 
   // --- Save Annotations (YOLO writer) ---
-  const saveAnnotations = async () => {
+  const saveAnnotations = async (customAnnotations = null) => {
     if (currentImageIndex === -1) return;
     const imgName = images[currentImageIndex].name;
     
+    const annotationsToSave = customAnnotations || activeAnnotations.current;
+    
     // Generate YOLO text content
     let content = '';
-    for (const ann of activeAnnotations.current) {
+    for (const ann of annotationsToSave) {
       const classId = CLASSES_BY_NAME[ann.class].id;
       const [x0, y0, x1, y1] = ann.box;
 
@@ -787,15 +789,14 @@ export default function Home() {
         const copy = [...activeAnnotations.current];
         const deletedClass = copy[targetIdx].class;
         copy.splice(targetIdx, 1);
+        
+        activeAnnotations.current = copy;
         setAnnotations(copy);
         setSelectedAnnotationIndex(-1);
         setStatus(`🗑️ Deleted selected ${deletedClass} annotation.`, 'var(--accent-amber)');
         
-        // Auto-save changes immediately
-        setTimeout(() => {
-          saveAnnotations();
-          drawCanvas();
-        }, 0);
+        saveAnnotations(copy);
+        drawCanvas();
         return;
       }
     }
@@ -803,14 +804,13 @@ export default function Home() {
     if (activeAnnotations.current.length > 0) {
       const copy = [...activeAnnotations.current];
       const popped = copy.pop();
+      
+      activeAnnotations.current = copy;
       setAnnotations(copy);
       setStatus(`↩️ Deleted last drawn ${popped.class} annotation.`, 'var(--accent-amber)');
       
-      // Auto-save changes immediately
-      setTimeout(() => {
-        saveAnnotations();
-        drawCanvas();
-      }, 0);
+      saveAnnotations(copy);
+      drawCanvas();
     } else {
       setStatus('ℹ️ No annotations exist to delete.', 'var(--txt-muted)');
     }
@@ -821,12 +821,12 @@ export default function Home() {
 
     if (activeAnnotations.current.length > 0) {
       if (confirm('Are you sure you want to delete ALL annotations on this image?')) {
-        setAnnotations([]);
+        const copy = [];
+        activeAnnotations.current = copy;
+        setAnnotations(copy);
         setStatus('🗑️ Cleared all annotations on current image.', 'var(--accent-amber)');
-        setTimeout(() => {
-          saveAnnotations();
-          drawCanvas();
-        }, 0);
+        saveAnnotations(copy);
+        drawCanvas();
       }
     }
   };
@@ -1153,14 +1153,12 @@ export default function Home() {
           };
 
           const copy = [...activeAnnotations.current, newAnn];
+          activeAnnotations.current = copy;
           setAnnotations(copy);
           setSelectedAnnotationIndex(-1); // Deselect on creating a new box
           
-          // Auto-save changes immediately
-          setTimeout(() => {
-            saveAnnotations();
-            drawCanvas();
-          }, 0);
+          saveAnnotations(copy);
+          drawCanvas();
         }
       }
     }
