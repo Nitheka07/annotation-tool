@@ -149,6 +149,13 @@ export default function Home() {
   const activeAnnotations = useRef([]);
   const activeDirectoryHandle = useRef(null);
   const lastTxtMtime = useRef(null);
+  const lastLoadedImageName = useRef('');
+
+  // Reset last loaded image when directory changes to ensure proper fitting in a new folder
+  useEffect(() => {
+    lastLoadedImageName.current = '';
+  }, [directoryHandle]);
+
 
   // --- Initialize Client-Side Utilities ---
   useEffect(() => {
@@ -830,14 +837,26 @@ export default function Home() {
     if (currentImageIndex === -1 || images.length === 0) {
       // Clear canvas if no drawings
       currentImageRef.current = null;
+      lastLoadedImageName.current = '';
       drawCanvas();
       return;
     }
 
     const imgObj = images[currentImageIndex];
-    setStatus(`Loading drawing ${imgObj.name}...`, 'var(--accent-blue)');
+    if (!imgObj) return;
 
+    const isSameImage = imgObj.name === lastLoadedImageName.current;
+    lastLoadedImageName.current = imgObj.name;
     activeImageFile.current = imgObj.name;
+
+    if (isSameImage) {
+      // Image has already been loaded, scale/pan shouldn't be reset.
+      // Just redraw the annotations and active canvas.
+      drawCanvas();
+      return;
+    }
+
+    setStatus(`Loading drawing ${imgObj.name}...`, 'var(--accent-blue)');
 
     if (p2pRoleRef.current === 'guest') {
       // --- P2P GUEST MODE: Request image from host browser ---
